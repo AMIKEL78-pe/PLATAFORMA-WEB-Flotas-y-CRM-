@@ -783,10 +783,6 @@ function crearLead(l) {
   var c = C(), k = l.email ? c.contactos.filter(function (x) { return (x.email || '').toLowerCase() === l.email; })[0] : null;
   var lead = Object.assign({ id: A.uid('l'), fecha: hoy(), estado: 'Nuevo', contactoId: k ? k.id : null, dealId: null }, l);
   c.leads.unshift(lead);
-  c.campanias.forEach(function (cp) {
-    var t = cp.disparador || {};
-    if (cp.activa && (t.tipo === 'lead_nuevo' || (t.tipo === 'lead_fuente' && t.valor === lead.fuente))) cp.inscritos.push({ ref: 'l:' + lead.id, desde: hoy() });
-  });
   log('lead', 'Lead recibido desde ' + lead.fuente + ': ' + lead.nombre + (k ? ' (contacto existente)' : ''), { contactoId: k ? k.id : null });
   save(); return lead;
 }
@@ -812,6 +808,93 @@ function convertirLead(l) {
     log('lead', 'Lead convertido: ' + l.nombre + ' → oportunidad "' + d.nombre + '"', { contactoId: k.id, empresaId: d.empresaId, dealId: d.id });
     save(); rerender(); A.toast('Lead convertido. La oportunidad está en "' + CRM.primeraAbierta(c).nombre + '".');
   });
+}
+
+
+/* ---------- importación CSV de leads ---------- */
+var COLS = [
+  ['nombre', 'Sí', 'Nombre completo del prospecto', 'Gabriela Ríos Paredes', ['nombre', 'nombres', 'nombrecompleto', 'name', 'fullname']],
+  ['email', 'Sí*', 'Correo electrónico', 'gabriela.rios@empresa.pe', ['email', 'correo', 'correoelectronico', 'mail', 'emailaddress']],
+  ['telefono', 'Sí*', 'Celular o teléfono', '987654321', ['telefono', 'celular', 'movil', 'phone', 'phonenumber', 'whatsapp']],
+  ['empresa', 'No', 'Razón social o nombre comercial', 'Comercial Lima Norte S.A.C.', ['empresa', 'razonsocial', 'company', 'companyname']],
+  ['ruc', 'No', 'RUC de 11 dígitos', '20123456786', ['ruc']],
+  ['interes', 'No', 'Servicio o producto de interés', 'Soporte TI anual', ['interes', 'servicio', 'producto']],
+  ['mensaje', 'No', 'Consulta o comentario', 'Necesito cotización', ['mensaje', 'comentario', 'comentarios', 'observaciones', 'message']],
+  ['fuente', 'No', 'Origen del lead; vacío = "Importación CSV"', 'Feria comercial', ['fuente', 'origen', 'source']],
+  ['consentimiento', 'Recomendada', 'Sí / No: autoriza el tratamiento de datos (Ley 29733); vacío = No', 'Sí', ['consentimiento', 'autoriza', 'acepta']],
+  ['fecha', 'No', 'Fecha del lead: dd/mm/aaaa o aaaa-mm-dd; vacío = hoy', '01/10/2026', ['fecha', 'fechaderegistro', 'fecharegistro', 'date']],
+  ['campania', 'No', 'Campaña o UTM de origen', 'feria-octubre', ['campania', 'campana', 'utmcampaign', 'campaign']]
+];
+function cardCSV() {
+  return '<div class="card" style="grid-column:1/-1"><h2>Importar leads desde .csv</h2><p class="small muted">Sube un archivo con una fila por prospecto. La primera fila debe tener los nombres de las columnas (en cualquier orden). Se acepta separador punto y coma o coma, en UTF-8 (Excel: "CSV UTF-8").</p>'
+    + '<div class="gw" style="max-height:none"><table class="g ent"><thead><tr><th class="stk l">Columna</th><th class="l">¿Obligatoria?</th><th class="l">Qué llenar</th><th class="l">Ejemplo</th></tr></thead><tbody>'
+    + COLS.map(function (c) { return '<tr><td class="lbl stk"><code>' + c[0] + '</code></td><td class="c l">' + (c[1] === 'Sí' || c[1] === 'Sí*' ? '<b>' + c[1] + '</b>' : c[1]) + '</td><td class="c l wrap">' + esc(c[2]) + '</td><td class="c l">' + esc(c[3]) + '</td></tr>'; }).join('')
+    + '</tbody></table></div><p class="small">* Debe llenarse <b>email o teléfono</b> (al menos uno). Las filas con un email que ya existe entre los leads se omiten por duplicadas.</p>'
+    + '<div class="bar" style="margin-top:10px"><button class="btn pri" data-ca="impCSV">Importar .csv</button><button class="btn" data-ca="plantillaCSV">Descargar plantilla .csv</button></div></div>';
+}
+function normCab(s) { return String(s || '').replace(/^\uFEFF/, '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function parseCSV(txt) {
+  txt = String(txt).replace(/^\uFEFF/, '');
+  var primera = txt.split(/\r?\n/)[0] || '', sep = (primera.split(';').length >= primera.split(',').length) ? ';' : ',';
+  var filas = [], fila = [], campo = '', q = false;
+  for (var i = 0; i < txt.length; i++) {
+    var ch = txt[i];
+    if (q) { if (ch === '"') { if (txt[i + 1] === '"') { campo += '"'; i++; } else q = false; } else campo += ch; continue; }
+    if (ch === '"') q = true; else if (ch === sep) { fila.push(campo); campo = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && txt[i + 1] === '\n') i++; fila.push(campo); filas.push(fila); fila = []; campo = ''; }
+    else campo += ch;
+  }
+  if (campo !== '' || fila.length) { fila.push(campo); filas.push(fila); }
+  return filas.filter(function (f) { return f.some(function (x) { return String(x).trim() !== ''; }); });
+}
+function fechaCSV(s) {
+  s = String(s || '').trim(); if (!s) return { f: hoy() };
+  var m1 = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/), m2 = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  var y, mo, d; if (m1) { d = +m1[1]; mo = +m1[2]; y = +m1[3]; } else if (m2) { y = +m2[1]; mo = +m2[2]; d = +m2[3]; } else return { error: 'fecha "' + s + '" no reconocida' };
+  var dt = new Date(Date.UTC(y, mo - 1, d)); if (dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return { error: 'fecha "' + s + '" no existe' };
+  return { f: dt.toISOString().slice(0, 10) };
+}
+function siNo(s) { return /^(si|sí|s|yes|y|true|1|x|acepta|autoriza)$/i.test(String(s || '').trim()); }
+function analizarCSV(txt) {
+  var filas = parseCSV(txt); if (filas.length < 2) return { error: 'El archivo no tiene filas de datos (la primera fila debe ser la cabecera).' };
+  var cab = filas[0].map(normCab), idx = {};
+  COLS.forEach(function (c) { var pos = cab.findIndex(function (h) { return c[4].indexOf(h) >= 0; }); if (pos >= 0) idx[c[0]] = pos; });
+  if (idx.nombre === undefined) return { error: 'Falta la columna obligatoria "nombre".' };
+  if (idx.email === undefined && idx.telefono === undefined) return { error: 'Falta la columna "email" o "telefono" (al menos una).' };
+  var ignoradas = filas[0].filter(function (h, i) { return !Object.keys(idx).some(function (k) { return idx[k] === i; }) && String(h).trim(); });
+  var existentes = {}; C().leads.forEach(function (l) { if (l.email) existentes[l.email.toLowerCase()] = 1; });
+  var ok = [], errs = [], avisos = [];
+  filas.slice(1).forEach(function (f, n) {
+    var g = function (k) { return idx[k] === undefined ? '' : String(f[idx[k]] || '').trim(); }, nf = n + 2;
+    var r = CRM.normalizarLead({ nombre: g('nombre'), email: g('email'), telefono: g('telefono'), empresa: g('empresa'), ruc: g('ruc'), mensaje: g('mensaje'), interes: g('interes'), fuente: g('fuente') || 'Importación CSV', consentimiento: siNo(g('consentimiento')), utm: { campaign: g('campania') } });
+    if (r.error) { errs.push('Fila ' + nf + ': ' + r.error); return; }
+    var fe = fechaCSV(g('fecha')); if (fe.error) { errs.push('Fila ' + nf + ': ' + fe.error); return; }
+    if (r.lead.email && existentes[r.lead.email]) { errs.push('Fila ' + nf + ': ' + r.lead.email + ' ya existe (duplicado)'); return; }
+    if (r.lead.ruc && !CRM.validarRUC(r.lead.ruc)) avisos.push('Fila ' + nf + ': RUC ' + r.lead.ruc + ' no es válido (se importa igual)');
+    if (r.lead.email) existentes[r.lead.email] = 1;
+    r.lead.fecha = fe.f; ok.push(r.lead);
+  });
+  return { ok: ok, errs: errs, avisos: avisos, ignoradas: ignoradas, total: filas.length - 1 };
+}
+function importarCSV(file) {
+  if (!file) return;
+  var fr = new FileReader();
+  fr.onload = function () {
+    var r = analizarCSV(fr.result);
+    if (r.error) { modal('No se pudo importar', '<p>' + esc(r.error) + '</p><p class="small muted">Revisa la tabla de columnas o descarga la plantilla.</p>', [{ t: 'Entendido', act: 'x', cls: 'pri' }], function () {}, 'sm'); return; }
+    var lista = function (t, arr) { return arr.length ? '<p class="small"><b>' + t + '</b></p><ul class="small" style="max-height:160px;overflow:auto;margin-top:0">' + arr.slice(0, 50).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + (arr.length > 50 ? '<li>y ' + (arr.length - 50) + ' más…</li>' : '') + '</ul>' : ''; };
+    var cuerpo = '<p><b>' + r.ok.length + '</b> de ' + r.total + ' filas listas para importar' + (r.errs.length ? ' · <span class="neg">' + r.errs.length + ' se omitirán</span>' : '') + '.</p>'
+      + (r.ok.length ? '<div class="gw" style="max-height:200px"><table class="g"><thead><tr><th class="stk l">Nombre</th><th class="l">Email</th><th class="l">Teléfono</th><th class="l">Empresa</th><th>Fecha</th></tr></thead><tbody>' + r.ok.slice(0, 8).map(function (l) { return '<tr><td class="lbl stk">' + esc(l.nombre) + '</td><td class="c l">' + esc(l.email) + '</td><td class="c l">' + esc(l.telefono) + '</td><td class="c l">' + esc(l.empresa) + '</td><td class="num">' + fF(l.fecha) + '</td></tr>'; }).join('') + '</tbody></table></div>' + (r.ok.length > 8 ? '<p class="small muted">y ' + (r.ok.length - 8) + ' más.</p>' : '') : '')
+      + lista('Filas omitidas', r.errs) + lista('Avisos', r.avisos) + (r.ignoradas.length ? '<p class="small muted">Columnas no reconocidas (se ignoran): ' + esc(r.ignoradas.join(', ')) + '</p>' : '');
+    var btn = [{ t: 'Cancelar', act: 'x' }]; if (r.ok.length) btn.push({ t: 'Importar ' + r.ok.length + ' leads', act: 'ok', cls: 'pri' });
+    modal('Vista previa de la importación', cuerpo, btn, function () {
+      if (r.ok.some(function (l) { return l.fuente === 'Importación CSV'; }) && C().fuentes.indexOf('Importación CSV') < 0) C().fuentes.push('Importación CSV');
+      r.ok.slice().reverse().forEach(function (l) { if (l.fuente && C().fuentes.indexOf(l.fuente) < 0) C().fuentes.push(l.fuente); crearLead(l); });
+      C().leads.sort(function (a, b) { return a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0; });
+      S().ui.leadEstado = ''; save(); rerender(); A.toast(r.ok.length + ' leads importados.');
+    });
+  };
+  fr.readAsText(file, 'utf-8');
 }
 
 /* ---------- gráficos SVG ---------- */
@@ -1003,7 +1086,7 @@ function fichaContacto(k) {
     + '<details open class="card"><summary>Oportunidades (' + ds.length + ')</summary>' + assocDeals(ds) + '</details>'
     + '<details open class="card"><summary>Pagos (' + ps.length + ')</summary>' + assocPagos(ps) + '</details>'
     + '<details open class="card"><summary>Vehículos de flota</summary>' + assocVeh(k.empresaId) + '</details>'
-    + '<details class="card"><summary>Origen y campañas</summary>' + (lds.length ? lds.map(function (l) { return '<p class="small">Lead del ' + fF(l.fecha) + ' vía ' + esc(l.fuente) + '</p>'; }).join('') : '<p class="small muted">Creado manualmente.</p>') + (cps.length ? '<p class="small">Campañas: ' + cps.map(function (x) { return esc(x.nombre); }).join(', ') + '</p>' : '') + '</details></aside>';
+    + '<details class="card"><summary>Origen</summary>' + (lds.length ? lds.map(function (l) { return '<p class="small">Lead del ' + fF(l.fecha) + ' vía ' + esc(l.fuente) + '</p>'; }).join('') : '<p class="small muted">Creado manualmente.</p>') + '</details></aside>';
   return h;
 }
 function fichaEmpresa(e) {
@@ -1024,8 +1107,8 @@ function fichaEmpresa(e) {
 function vLeads() {
   var c = C(), r = calc(), ui = S().ui, fe = ui.leadEstado || '';
   var cnt = {}; c.leads.forEach(function (l) { cnt[l.estado] = (cnt[l.estado] || 0) + 1; });
-  var h = '<div class="tiles t4">' + tile('Leads recibidos', n0(c.leads.length), '', 'Todas las fuentes') + tile('Nuevos sin atender', n0(cnt.Nuevo || 0), '', 'Requieren primer contacto', (cnt.Nuevo || 0) > 5 ? 'bad' : '') + tile('Convertidos', n0(cnt.Convertido || 0), '', r.kpi.convLeads === null ? '–' : A.nf(1).format(r.kpi.convLeads) + ' % de conversión') + tile('Envíos listos', n0(r.envios.filter(function (x) { return x.estado === 'Listo para enviar'; }).length), '', 'Correos de campañas por enviar') + '</div>';
-  h += '<div class="bar"><span class="seg" role="group" aria-label="Estado">' + [['', 'Todos'], ['Nuevo', 'Nuevos'], ['Contactado', 'Contactados'], ['Calificado', 'Calificados'], ['Convertido', 'Convertidos'], ['Descartado', 'Descartados']].map(function (x) { return '<button data-le="' + x[0] + '" aria-pressed="' + (fe === x[0]) + '">' + x[1] + (x[0] ? ' ' + (cnt[x[0]] || 0) : '') + '</button>'; }).join('') + '</span><span class="sp"></span><button class="btn" data-ca="csvLeads">Exportar CSV</button></div>';
+  var h = '<div class="tiles t4">' + tile('Leads recibidos', n0(c.leads.length), '', 'Todas las fuentes') + tile('Nuevos sin atender', n0(cnt.Nuevo || 0), '', 'Requieren primer contacto', (cnt.Nuevo || 0) > 5 ? 'bad' : '') + tile('Convertidos', n0(cnt.Convertido || 0), '', r.kpi.convLeads === null ? '–' : A.nf(1).format(r.kpi.convLeads) + ' % de conversión') + tile('Sin consentimiento', n0(c.leads.filter(function (l) { return !l.consentimiento; }).length), '', 'No autorizaron sus datos (Ley 29733)')+ '</div>';
+  h += '<div class="bar"><span class="seg" role="group" aria-label="Estado">' + [['', 'Todos'], ['Nuevo', 'Nuevos'], ['Contactado', 'Contactados'], ['Calificado', 'Calificados'], ['Convertido', 'Convertidos'], ['Descartado', 'Descartados']].map(function (x) { return '<button data-le="' + x[0] + '" aria-pressed="' + (fe === x[0]) + '">' + x[1] + (x[0] ? ' ' + (cnt[x[0]] || 0) : '') + '</button>'; }).join('') + '</span><span class="sp"></span><button class="btn pri" data-ca="impCSV">Importar .csv</button><button class="btn" data-ca="csvLeads">Exportar CSV</button></div>';
   var ls = c.leads.filter(function (l) { return !fe || l.estado === fe; });
   h += '<div class="gw"><table class="g"><thead><tr><th class="stk l">Prospecto</th><th>Fecha</th><th class="l">Empresa</th><th class="l">Contacto</th><th class="l">Fuente</th><th class="l">Interés</th><th class="l">Estado</th><th class="l">Acciones</th></tr></thead><tbody>'
     + ls.map(function (l) {
@@ -1033,44 +1116,14 @@ function vLeads() {
         + '<td>' + (l.estado === 'Convertido' ? '<span style="padding:0 10px">' + estChip('Convertido') + '</span>' : '<select class="cell u" data-lest="' + l.id + '" aria-label="Estado">' + ['Nuevo', 'Contactado', 'Calificado', 'Descartado'].map(function (x) { return opt(x, x, x === l.estado); }).join('') + '</select>') + '</td>'
         + '<td><div class="acts">' + (l.estado === 'Convertido' ? (l.contactoId ? '<button class="btn sm" data-sel="c|' + l.contactoId + '" data-gocont="1">Ver ficha</button>' : '') + (l.dealId ? '<button class="btn sm" data-deal="' + l.dealId + '">Oportunidad</button>' : '') : '<button class="btn sm pri" data-lconv="' + l.id + '">Convertir</button>') + '</div></td></tr>';
     }).join('') + '</tbody></table></div>';
-  h += '<div class="g2"><div class="card"><h2>Formulario web de prueba</h2><p class="small muted">Simula lo que enviará el formulario del sitio web a la API. El lead entra como "Nuevo" y se inscribe en las campañas activas que correspondan.</p><div class="fgrid">'
-    + fld('Nombre completo', '<input class="f u" id="fwN">') + fld('Email', '<input class="f u" id="fwE" type="email">') + fld('Teléfono', '<input class="f u" id="fwT" inputmode="tel">') + fld('Empresa', '<input class="f u" id="fwEm">')
-    + fld('Fuente', '<select class="f u" id="fwF">' + c.fuentes.map(function (x) { return opt(x, x, x === 'Formulario web'); }).join('') + '</select>') + fld('Campaña UTM', '<input class="f u" id="fwU" placeholder="campania-octubre">')
-    + fld('Mensaje', '<textarea class="f u" id="fwM" rows="2"></textarea>', 'span2') + '<label class="chk span2"><input type="checkbox" id="fwC" checked> Acepto la política de privacidad (Ley 29733)</label></div><div class="bar" style="margin-top:10px"><button class="btn pri" data-ca="fwEnviar">Enviar lead</button></div></div>'
+  h += '<div class="g2">' + cardCSV()
     + '<div class="card"><h2>Recibir payload de API o Meta Lead Ads</h2><p class="small muted">Pega el JSON que llegaría al webhook. Acepta el formato propio de COSEINCO y el de Facebook/Instagram Lead Ads (<code>field_data</code>).</p><textarea class="f u" id="plTx" rows="7" style="width:100%;font-family:Consolas,monospace;font-size:12.5px">{\n  "nombre": "Gabriela Ríos",\n  "email": "gabriela.rios@ejemplo.pe",\n  "telefono": "987654321",\n  "empresa": "Comercial Lima Norte S.A.C.",\n  "interes": "Soporte TI anual",\n  "fuente": "API",\n  "consentimiento": true\n}</textarea><div class="bar" style="margin-top:10px"><button class="btn pri" data-ca="plProcesar">Procesar payload</button><button class="btn" data-ca="plMeta">Ejemplo Meta Lead Ads</button></div></div></div>';
   h += '<details class="card"><summary>Especificación de la API de captación</summary>' + apiSpec() + '</details>';
   return h;
 }
 function apiSpec() {
-  return '<p class="small">En producción el backend expone estos endpoints. En esta versión local, los mismos datos se procesan con el formulario y el campo de payload de arriba.</p><pre class="code">POST /api/v1/leads\nContent-Type: application/json\nX-Coseinco-Key: &lt;clave del sitio&gt;\nX-Coseinco-Signature: sha256=&lt;HMAC del cuerpo&gt;\n\n{\n  "nombre": "Gabriela Ríos",\n  "email": "gabriela.rios@ejemplo.pe",\n  "telefono": "987654321",\n  "empresa": "Comercial Lima Norte S.A.C.",\n  "ruc": "20xxxxxxxxx",\n  "interes": "Soporte TI anual",\n  "mensaje": "Necesito cotización",\n  "fuente": "Formulario web",\n  "consentimiento": true,\n  "utm": { "source": "google", "campaign": "campania-octubre" }\n}\n\n201 Created  { "id": "l_8f2…", "estado": "Nuevo", "duplicado": false }\n422 Unprocessable  { "error": "Falta un email o teléfono." }\n\nGET  /api/v1/webhooks/meta   (verificación hub.challenge)\nPOST /api/v1/webhooks/meta   (leadgen → consulta Graph API → normaliza field_data)\nPOST /api/v1/webhooks/pagos  (confirmación de la pasarela → pago = Pagado)</pre>'
+  return '<p class="small">En producción el backend expone estos endpoints. En esta versión local, los mismos datos se procesan con la importación CSV y el campo de payload de arriba.</p><pre class="code">POST /api/v1/leads\nContent-Type: application/json\nX-Coseinco-Key: &lt;clave del sitio&gt;\nX-Coseinco-Signature: sha256=&lt;HMAC del cuerpo&gt;\n\n{\n  "nombre": "Gabriela Ríos",\n  "email": "gabriela.rios@ejemplo.pe",\n  "telefono": "987654321",\n  "empresa": "Comercial Lima Norte S.A.C.",\n  "ruc": "20xxxxxxxxx",\n  "interes": "Soporte TI anual",\n  "mensaje": "Necesito cotización",\n  "fuente": "Formulario web",\n  "consentimiento": true,\n  "utm": { "source": "google", "campaign": "campania-octubre" }\n}\n\n201 Created  { "id": "l_8f2…", "estado": "Nuevo", "duplicado": false }\n422 Unprocessable  { "error": "Falta un email o teléfono." }\n\nGET  /api/v1/webhooks/meta   (verificación hub.challenge)\nPOST /api/v1/webhooks/meta   (leadgen → consulta Graph API → normaliza field_data)\nPOST /api/v1/webhooks/pagos  (confirmación de la pasarela → pago = Pagado)</pre>'
     + '<p class="small"><b>Código para el sitio web</b> (sin librerías externas):</p><pre class="code">&lt;form id="fCoseinco"&gt;…campos nombre, email, telefono, empresa, mensaje, consentimiento…&lt;/form&gt;\n&lt;script&gt;\ndocument.getElementById("fCoseinco").addEventListener("submit", async e =&gt; {\n  e.preventDefault();\n  const d = Object.fromEntries(new FormData(e.target));\n  d.consentimiento = !!d.consentimiento; d.fuente = "Formulario web";\n  d.utm = Object.fromEntries(new URLSearchParams(location.search));\n  const r = await fetch("https://crm.coseinco.pe/api/v1/leads", {\n    method: "POST", headers: { "Content-Type": "application/json", "X-Coseinco-Key": "PUBLICA_DEL_SITIO" },\n    body: JSON.stringify(d) });\n  e.target.innerHTML = r.ok ? "Gracias, te contactaremos hoy." : "No se pudo enviar, intenta de nuevo.";\n});\n&lt;/script&gt;</pre>';
-}
-function vCampanias() {
-  var c = C(), r = calc(), ui = S().ui, sel = byId(c.campanias, ui.campSel) || c.campanias[0];
-  var h = '<div class="p2"><aside class="pl"><h2 class="h2s">Campañas</h2><ul class="rl">' + c.campanias.map(function (cp) {
-    var es = r.envios.filter(function (x) { return x.campania === cp; });
-    return '<li><button data-camp="' + cp.id + '"' + (sel && sel.id === cp.id ? ' aria-current="true"' : '') + '><span><b>' + esc(cp.nombre) + '</b><small>' + (cp.activa ? 'Activa' : 'Pausada') + ' · ' + cp.inscritos.length + ' inscritos · ' + es.filter(function (x) { return x.estado === 'Enviado'; }).length + ' enviados · ' + es.filter(function (x) { return x.estado === 'Listo para enviar'; }).length + ' listos</small></span></button></li>';
-  }).join('') + '</ul><button class="btn pri full" data-ca="nuevaCamp">Nueva campaña</button></aside>';
-  if (!sel) return h + '<section class="pc card"><p class="muted">Crea una campaña de seguimiento automático.</p></section></div>';
-  var ps = sel.pasos, tdisp = sel.disparador || { tipo: 'manual', valor: '' };
-  h += '<section class="pc"><div class="card"><div class="fgrid">' + fld('Nombre', '<input class="f u" data-cpe="nombre" value="' + esc(sel.nombre) + '">', 'span2')
-    + fld('Disparador', '<select class="f u" data-cpe="disp">' + opt('lead_nuevo', 'Todo lead nuevo', tdisp.tipo === 'lead_nuevo') + opt('lead_fuente', 'Lead nuevo de una fuente', tdisp.tipo === 'lead_fuente') + opt('manual', 'Inscripción manual', tdisp.tipo === 'manual') + '</select>')
-    + (tdisp.tipo === 'lead_fuente' ? fld('Fuente', '<select class="f u" data-cpe="dispv">' + c.fuentes.map(function (x) { return opt(x, x, x === tdisp.valor); }).join('') + '</select>') : '<span></span>')
-    + '<label class="chk"><input type="checkbox" data-cpe="activa"' + (sel.activa ? ' checked' : '') + '> Campaña activa</label><label class="chk"><input type="checkbox" data-cpe="detener"' + (sel.detenerAlConvertir ? ' checked' : '') + '> Detener al convertir o descartar el lead</label></div></div>';
-  h += '<div class="card"><h2>Secuencia<small>variables: {{nombre}} {{empresa}}</small></h2><ol class="steps">' + ps.map(function (p, i) {
-    return '<li><div class="fgrid">' + fld('Día', '<input class="f u" type="number" min="0" data-cps="' + i + '|dias" value="' + p.dias + '" style="max-width:90px">') + fld('Asunto', '<input class="f u" data-cps="' + i + '|asunto" value="' + esc(p.asunto) + '">', 'span2') + fld('Cuerpo', '<textarea class="f u" rows="3" data-cps="' + i + '|cuerpo">' + esc(p.cuerpo) + '</textarea>', 'span3') + '</div><button class="btn sm danger" data-cpdel="' + i + '">Quitar paso</button></li>';
-  }).join('') + '</ol><button class="btn" data-ca="addPaso">Agregar paso</button></div>';
-  var ins = c.leads.filter(function (l) { return !sel.inscritos.some(function (x) { return x.ref === 'l:' + l.id; }); }).map(function (l) { return ['l:' + l.id, 'Lead · ' + l.nombre]; })
-    .concat(c.contactos.filter(function (k) { return !sel.inscritos.some(function (x) { return x.ref === 'c:' + k.id; }); }).map(function (k) { return ['c:' + k.id, 'Contacto · ' + nomC(k)]; }));
-  h += '<div class="bar"><label class="vsel">Inscribir <select id="cpIns">' + ins.map(function (x) { return opt(x[0], x[1]); }).join('') + '</select></label><button class="btn" data-ca="inscribir">Inscribir</button><span class="sp"></span><button class="btn danger" data-ca="delCamp">Eliminar campaña</button></div>';
-  var es = r.envios.filter(function (x) { return x.campania === sel; }), fe = ui.envEstado || 'Listo para enviar';
-  var cnt = {}; es.forEach(function (x) { cnt[x.estado] = (cnt[x.estado] || 0) + 1; });
-  h += '<div class="card"><h2>Cola de envíos</h2><div class="bar"><span class="seg" role="group">' + ['Listo para enviar', 'Programado', 'Enviado', 'Cancelado', 'Pausado'].map(function (x) { return '<button data-ee="' + x + '" aria-pressed="' + (fe === x) + '">' + x + ' ' + (cnt[x] || 0) + '</button>'; }).join('') + '</span></div>';
-  var fl = es.filter(function (x) { return x.estado === fe; });
-  h += fl.length ? '<div class="gw" style="max-height:420px"><table class="g"><thead><tr><th class="stk l">Destinatario</th><th>Fecha</th><th>Paso</th><th class="l">Asunto</th><th class="l">Estado</th><th></th></tr></thead><tbody>' + fl.map(function (x) {
-    return '<tr><td class="lbl stk">' + esc(x.de.nombre) + '<br><span class="small muted">' + esc(x.de.email || 'sin email') + '</span></td><td class="num">' + fF(x.fecha) + '</td><td class="num">' + x.n + '</td><td class="c l">' + esc(CRM.plantilla(x.paso.asunto, x.de)) + '</td><td class="c l">' + estChip(x.estado) + (x.enviadoEl ? ' <span class="small muted">' + fF(x.enviadoEl) + '</span>' : '') + '</td><td><div class="acts">' + (x.estado === 'Listo para enviar' && x.de.email ? '<button class="btn sm pri" data-env="' + esc(x.key) + '">Enviar</button><button class="btn sm" data-envm="' + esc(x.key) + '">Marcar enviado</button>' : '') + '</div></td></tr>';
-  }).join('') + '</tbody></table></div>' : '<p class="muted small">Nada en este estado.</p>';
-  return h + '<p class="small muted">En esta versión local, "Enviar" abre tu programa de correo con el mensaje listo y lo registra. En producción, un proceso programado lo envía por SMTP corporativo o un servicio transaccional y registra aperturas y rebotes.</p></div></section></div>';
 }
 function vCfg() {
   var c = C();
@@ -1183,21 +1236,11 @@ function eventos() {
     t = e.target.closest('[data-ct]'); if (t) { S().ui.crmTab = t.dataset.ct; S().ui.crmSel = null; save(); rerender(); return; }
     t = e.target.closest('[data-cv]'); if (t) { S().ui.crmVista = t.dataset.cv; S().ui.crmSel = null; save(); rerender(); return; }
     t = e.target.closest('[data-le]'); if (t) { S().ui.leadEstado = t.dataset.le; save(); rerender(); return; }
-    t = e.target.closest('[data-ee]'); if (t) { S().ui.envEstado = t.dataset.ee; save(); rerender(); return; }
-    t = e.target.closest('[data-camp]'); if (t) { S().ui.campSel = t.dataset.camp; save(); rerender(); return; }
     t = e.target.closest('[data-comp]'); if (t) { S().ui.compTab = t.dataset.comp; save(); rerender(); return; }
     t = e.target.closest('[data-lconv]'); if (t) { convertirLead(byId(C().leads, t.dataset.lconv)); return; }
     t = e.target.closest('[data-pp]'); if (t) { marcarPagado(byId(C().pagos, t.dataset.pp)); return; }
     t = e.target.closest('[data-plink]'); if (t) { var pg = byId(C().pagos, t.dataset.plink), txt = 'https://' + (pg.enlace || 'pagos.coseinco.pe/p/' + pg.id); try { navigator.clipboard.writeText(txt).then(function () { A.toast('Enlace copiado (simulado): ' + txt); }, function () { A.toast(txt); }); } catch (x) { A.toast(txt); } return; }
     t = e.target.closest('[data-panul]'); if (t) { var pa = byId(C().pagos, t.dataset.panul); A.preguntar('Anular comprobante', '¿Anular ' + pa.numero + '? En producción también se comunica la baja a SUNAT.', 'Anular', true).then(function (ok) { if (!ok) return; pa.estado = 'Anulado'; log('pago', 'Comprobante anulado ' + pa.numero, { empresaId: pa.empresaId, dealId: pa.dealId }); save(); rerender(); }); return; }
-    t = e.target.closest('[data-env],[data-envm]'); if (t) {
-      var key = t.dataset.env || t.dataset.envm, x = calc().envios.filter(function (y) { return y.key === key; })[0]; if (!x) return;
-      if (t.dataset.env) { var a = document.createElement('a'); a.href = 'mailto:' + encodeURIComponent(x.de.email) + '?subject=' + encodeURIComponent(CRM.plantilla(x.paso.asunto, x.de)) + '&body=' + encodeURIComponent(CRM.plantilla(x.paso.cuerpo, x.de)); a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove(); }
-      C().enviados[key] = hoy(); var ref = key.split('|')[1].split(':');
-      log('email', 'Campaña "' + x.campania.nombre + '", paso ' + x.n + ': ' + CRM.plantilla(x.paso.asunto, x.de), ref[0] === 'c' ? { contactoId: ref[1] } : (x.de.lead && x.de.lead.contactoId ? { contactoId: x.de.lead.contactoId } : {}));
-      save(); rerender(); return;
-    }
-    t = e.target.closest('[data-cpdel]'); if (t) { var cp = byId(C().campanias, S().ui.campSel) || C().campanias[0]; cp.pasos.splice(+t.dataset.cpdel, 1); save(); rerender(); return; }
     t = e.target.closest('[data-etmv]'); if (t) { var q = t.dataset.etmv.split('|'), i = +q[0], j = i + (+q[1]), et = C().etapas; if (j < 0 || j >= et.length) return; var tmp = et[i]; et[i] = et[j]; et[j] = tmp; save(); rerender(); return; }
     t = e.target.closest('[data-etdel]'); if (t && !t.disabled) { C().etapas.splice(+t.dataset.etdel, 1); save(); rerender(); return; }
     t = e.target.closest('[data-ca]'); if (t) { accion(t.dataset.ca, t); return; }
@@ -1206,7 +1249,6 @@ function eventos() {
     var el = e.target;
     if (el.id === 'crmQ') { S().ui.crmQ = el.value; rerender('#crmQ'); return; }
     if (el.id === 'crmQ2') { S().ui.crmQ2 = el.value; rerender('#crmQ2'); return; }
-    if (el.matches('[data-cps]')) { var p = el.dataset.cps.split('|'), cp = byId(C().campanias, S().ui.campSel) || C().campanias[0]; cp.pasos[+p[0]][p[1]] = p[1] === 'dias' ? Math.max(0, parseInt(el.value, 10) || 0) : el.value; save(); return; }
     if (el.matches('textarea[data-cl]')) { var arr2 = el.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean); C()[el.dataset.cl] = arr2.filter(function (x, i) { return arr2.indexOf(x) === i; }); save(); return; }
   });
   document.addEventListener('change', function (e) {
@@ -1221,13 +1263,6 @@ function eventos() {
       o[p[2]] = v; save(); rerender(); return;
     }
     if (el.matches('[data-asig]')) { var q = el.dataset.asig.split('|'), vh = S().vehiculos.filter(function (x) { return x.id === q[0]; })[0]; vh.empresaId = el.checked ? q[1] : null; log('nota', (el.checked ? 'Vehículo asignado: ' : 'Vehículo liberado: ') + vh.nombre, { empresaId: q[1] }); save(); rerender(); return; }
-    if (el.matches('[data-cpe]')) {
-      var cp = byId(C().campanias, S().ui.campSel) || C().campanias[0], k = el.dataset.cpe;
-      if (k === 'nombre') cp.nombre = el.value; else if (k === 'activa') cp.activa = el.checked; else if (k === 'detener') cp.detenerAlConvertir = el.checked;
-      else if (k === 'disp') cp.disparador = { tipo: el.value, valor: el.value === 'lead_fuente' ? C().fuentes[0] : '' }; else if (k === 'dispv') cp.disparador.valor = el.value;
-      save(); rerender(); return;
-    }
-    if (el.matches('[data-cps]')) { rerender(); return; }
     if (el.matches('[data-et]')) { var r = el.dataset.et.split('|'), et = C().etapas[+r[0]]; et[r[1]] = r[1] === 'prob' ? Math.min(100, Math.max(0, parseFloat(el.value) || 0)) : el.value; save(); rerender(); return; }
     if (el.matches('[data-meta]')) { C().metas[el.dataset.meta] = parseFloat(String(el.value).replace(/,/g, '')) || 0; save(); return; }
   });
@@ -1266,17 +1301,10 @@ function accion(a, t) {
       break;
     case 'delContacto': { var k2 = con(t.dataset.ref); A.preguntar('Eliminar contacto', 'Se elimina ' + nomC(k2) + ' (derecho de cancelación). Sus oportunidades se conservan sin contacto.', 'Eliminar', true).then(function (ok) { if (!ok) return; c.contactos = c.contactos.filter(function (x) { return x !== k2; }); c.deals.forEach(function (d) { if (d.contactoId === k2.id) d.contactoId = ''; }); c.leads.forEach(function (l) { if (l.contactoId === k2.id) l.contactoId = null; }); c.campanias.forEach(function (cp) { cp.inscritos = cp.inscritos.filter(function (i) { return i.ref !== 'c:' + k2.id; }); }); S().ui.crmSel = null; save(); rerender(); }); break; }
     case 'delEmpresa': { var e2 = emp(t.dataset.ref), ne = c.deals.filter(function (d) { return d.empresaId === e2.id; }).length; if (ne) { A.toast('Tiene ' + ne + ' oportunidades: reasígnalas antes de eliminarla.'); return; } A.preguntar('Eliminar empresa', '¿Eliminar ' + e2.razonSocial + '?', 'Eliminar', true).then(function (ok) { if (!ok) return; c.empresas = c.empresas.filter(function (x) { return x !== e2; }); c.contactos.forEach(function (k) { if (k.empresaId === e2.id) k.empresaId = ''; }); S().vehiculos.forEach(function (v) { if (v.empresaId === e2.id) v.empresaId = null; }); S().ui.crmSel = null; save(); rerender(); }); break; }
-    case 'fwEnviar': {
-      var raw = { nombre: $('#fwN').value, email: $('#fwE').value, telefono: $('#fwT').value, empresa: $('#fwEm').value, mensaje: $('#fwM').value, fuente: $('#fwF').value, consentimiento: $('#fwC').checked, utm: { campaign: $('#fwU').value } };
-      var nl = CRM.normalizarLead(raw); if (nl.error) { A.toast(nl.error); return; } if (!nl.lead.consentimiento) { A.toast('Sin consentimiento no se puede registrar el lead.'); return; }
-      nl.lead.fuente = raw.fuente; var l2 = crearLead(nl.lead); rerender(); A.toast('Lead recibido: ' + l2.nombre + '.'); break;
-    }
+    case 'impCSV': { var fi = document.getElementById('csvLeadsIn'); if (!fi) { fi = document.createElement('input'); fi.type = 'file'; fi.id = 'csvLeadsIn'; fi.accept = '.csv,text/csv'; fi.className = 'hidden'; fi.addEventListener('change', function () { importarCSV(fi.files[0]); fi.value = ''; }); document.body.appendChild(fi); } fi.click(); break; }
+    case 'plantillaCSV': A.exportCSV('plantilla-leads.csv', [COLS.map(function (c) { return c[0]; }), COLS.map(function (c) { return c[3]; })]); break;
     case 'plProcesar': { var o; try { o = JSON.parse($('#plTx').value); } catch (x) { A.toast('El texto no es JSON válido.'); return; } var r2 = CRM.normalizarLead(o); if (r2.error) { A.toast('Payload rechazado (422): ' + r2.error); return; } var l3 = crearLead(r2.lead); rerender(); A.toast('201 Created: lead ' + l3.nombre + ' desde ' + l3.fuente + '.'); break; }
     case 'plMeta': $('#plTx').value = JSON.stringify({ campaign_name: 'meta-octubre', field_data: [{ name: 'full_name', values: ['Ricardo Palma Ortiz'] }, { name: 'email', values: ['ricardo.palma@ejemplo.pe'] }, { name: 'phone_number', values: ['+51 955 123 456'] }, { name: 'company_name', values: ['Transportes del Sur S.A.C.'] }] }, null, 2); break;
-    case 'nuevaCamp': { var cp = { id: A.uid('cp'), nombre: 'Nueva campaña', activa: false, detenerAlConvertir: true, disparador: { tipo: 'manual', valor: '' }, pasos: [{ dias: 0, asunto: 'Hola {{nombre}}', cuerpo: 'Hola {{nombre}}:\n\n' }], inscritos: [] }; c.campanias.push(cp); S().ui.campSel = cp.id; save(); rerender(); break; }
-    case 'addPaso': { var cp2 = byId(c.campanias, S().ui.campSel) || c.campanias[0], last = cp2.pasos[cp2.pasos.length - 1]; cp2.pasos.push({ dias: last ? (+last.dias || 0) + 3 : 0, asunto: '', cuerpo: '' }); save(); rerender(); break; }
-    case 'inscribir': { var cp3 = byId(c.campanias, S().ui.campSel) || c.campanias[0], v = $('#cpIns') && $('#cpIns').value; if (!v) return; cp3.inscritos.push({ ref: v, desde: hoy() }); save(); rerender(); A.toast('Inscrito en la campaña.'); break; }
-    case 'delCamp': { var cp4 = byId(c.campanias, S().ui.campSel) || c.campanias[0]; A.preguntar('Eliminar campaña', '¿Eliminar "' + cp4.nombre + '" y su cola de envíos?', 'Eliminar', true).then(function (ok) { if (!ok) return; c.campanias = c.campanias.filter(function (x) { return x !== cp4; }); S().ui.campSel = null; save(); rerender(); }); break; }
     case 'addEtapa': { var pos = c.etapas.findIndex(function (e) { return e.tipo !== 'abierta'; }); var ne2 = { id: A.uid('e'), nombre: 'Nueva etapa', prob: 50, tipo: 'abierta' }; if (pos < 0) c.etapas.push(ne2); else c.etapas.splice(pos, 0, ne2); save(); rerender(); break; }
     case 'csvPC': { var rr = calc(); A.exportCSV('por-cerrar.csv', [['Grupo', 'Fecha cierre', 'Dias', 'Oportunidad', 'Empresa', 'Etapa', 'Prob %', 'Valor S/', 'Ponderado S/', 'Propietario']].concat(rr.pendientes.map(function (x) { return [x.grupo, x.d.fechaCierre, x.diasCierre, x.d.nombre, (emp(x.d.empresaId) || {}).razonSocial || '', x.etapa.nombre, x.prob, x.valor, x.ponderado, x.d.propietario]; }))); break; }
     case 'csvPagos': A.exportCSV('pagos.csv', [['Comprobante', 'Numero', 'Emision', 'Cliente', 'RUC', 'Subtotal', 'IGV', 'Total', 'Metodo', 'Vencimiento', 'Estado', 'Fecha pago', 'Operacion']].concat(calc().pagos.map(function (x) { var p = x.p, e = emp(p.empresaId) || {}; return [p.comprobante, p.numero, p.emision, e.razonSocial || '', e.ruc || '', p.subtotal, p.igv, p.total, p.metodo, p.vencimiento, x.estado, p.fechaPago || '', p.operacion || '']; }))); break;
@@ -1292,7 +1320,6 @@ var VISTAS = [
   { id: 'pagos', t: 'Pagos', g: 'Ventas', f: vPagos },
   { id: 'contactos', t: 'Contactos y empresas', g: 'Clientes y marketing', f: vContactos },
   { id: 'leads', t: 'Leads y captación', g: 'Clientes y marketing', f: vLeads },
-  { id: 'campanias', t: 'Campañas de email', g: 'Clientes y marketing', f: vCampanias },
   { id: 'crmcfg', t: 'Configuración CRM', g: 'Configuración', f: vCfg },
   { id: 'arquitectura', t: 'Documento técnico', g: 'Configuración', f: vArq }
 ];
