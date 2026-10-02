@@ -1553,7 +1553,22 @@ var LEYENDA = '<div class="legend"><span><i class="sw u"></i>Dato del usuario</s
 function sinVeh() { return '<div class="card empty"><h2>Primero registra un vehículo</h2><p class="muted">Cada vehículo tiene su bitácora de combustible, su registro de mantenimiento y su reporte anual de gastos.</p><div class="bar"><button class="btn pri" data-go="vehiculos">Registrar vehículo</button><button class="btn" data-act="ejemplo">Cargar datos de ejemplo</button></div></div>'; }
 
 /* ---------- vistas ---------- */
-function vResumen() {
+function barraInicio() {
+  var u = S.ui.ultimoGuardado, hay = S.vehiculos.length || S.choferes.length || S.crm.deals.length || S.crm.leads.length || S.crm.contactos.length || S.crm.empresas.length;
+  var t = u ? new Date(u) : null, txt = t ? 'Último guardado: ' + t.toLocaleDateString('es-PE') + ' ' + t.toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit' }) : 'Se guarda solo en este navegador';
+  return '<div class="bar inicio"><span class="small muted" id="ultGuardado">' + esc(txt) + '</span><span class="sp"></span>'
+    + '<button class="btn pri" data-act="guardarAvance" title="Guarda ahora y descarga el archivo .html con todos tus datos">Guardar avance</button>'
+    + '<button class="btn danger" data-act="reiniciar"' + (hay ? '' : ' disabled') + ' title="Borra flota y CRM de este navegador">Reiniciar desde cero</button></div>';
+}
+function guardarAhora() {
+  clearTimeout(saveT); S.ui.ultimoGuardado = new Date().toISOString();
+  var ok = true; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { ok = false; }
+  var el = $('#ultGuardado'), t = new Date(S.ui.ultimoGuardado); if (el) el.textContent = 'Último guardado: ' + t.toLocaleDateString('es-PE') + ' ' + t.toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit' });
+  if (!ok) toast('Este navegador no permite guardar; usa el archivo .html descargado.');
+  descargarHtml(true);
+}
+function vResumen() { return barraInicio() + vResumenCuerpo(); }
+function vResumenCuerpo() {
   if (!S.vehiculos.length) return '<div class="card empty"><h2>Control de combustible y gastos de la flota</h2><p class="muted">Registra cada carga de combustible y cada gasto de mantenimiento por vehículo. La plataforma calcula el rendimiento, el costo por kilómetro y el reporte anual por secciones, igual que el libro de Excel.</p><div class="bar"><button class="btn pri" data-act="empezar">Empezar</button><button class="btn" data-act="ejemplo">Cargar datos de ejemplo</button></div></div>';
   var fl = R.flota, km = Math.max(0, Math.round(fl.km)), dig = String(km).padStart(7, '0').split('');
   var total = fl.soles + fl.mant;
@@ -1798,7 +1813,9 @@ function acciones(act, el) {
   switch (act) {
     case 'empezar': ir('vehiculos'); setTimeout(function () { var n = $('#nvNombre'); if (n) n.focus(); }, 0); break;
     case 'ejemplo': (S.vehiculos.length ? preguntar('Cargar datos de ejemplo', 'Se reemplazarán todos los datos actuales por el ejemplo. ¿Continuar?', 'Cargar ejemplo', true) : Promise.resolve(true)).then(function (ok) { if (ok) cargarEjemplo(); }); break;
-    case 'blanco': preguntar('Empezar en blanco', 'Se borrarán vehículos, cargas, gastos y choferes de este navegador. Las listas y ajustes vuelven a sus valores iniciales.', 'Borrar todo', true).then(function (ok) { if (!ok) return; var t = S.ui.tema; S = base(); S.ui.tema = t; guardar(); render(); toast('Plataforma en blanco.'); }); break;
+    case 'guardarAvance': guardarAhora(); break;
+    case 'reiniciar': preguntar('Reiniciar desde cero', 'Se borrarán de este navegador todos los datos de flota (vehículos, cargas, gastos, choferes) y del CRM (contactos, empresas, leads, oportunidades, pagos y campañas). Si quieres conservar una copia, usa antes "Guardar avance".', 'Borrar todo y reiniciar', true).then(function (ok) { if (!ok) return; var t = S.ui.tema; S = base(); S.ui.tema = t; S.ui.vista = 'resumen'; try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} render(); toast('Plataforma reiniciada desde cero.'); }); break;
+    case 'blanco': preguntar('Empezar en blanco', 'Se borrarán de este navegador los datos de flota y del CRM. Las listas y ajustes vuelven a sus valores iniciales.', 'Borrar todo', true).then(function (ok) { if (!ok) return; var t = S.ui.tema; S = base(); S.ui.tema = t; guardar(); render(); toast('Plataforma en blanco.'); }); break;
     case 'crearVeh': {
       var nm = ($('#nvNombre').value || '').trim().toUpperCase();
       if (!nm) { toast('Escribe el nombre del vehículo.'); $('#nvNombre').focus(); return; }
